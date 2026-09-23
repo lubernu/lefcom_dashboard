@@ -98,19 +98,26 @@ with st.sidebar:
     opts = _get_opciones(anio_sel, mes)
     if not opts.get('success'):
         st.error(opts.get('error', 'Error al cargar opciones.'))
-        asesores, cps_list = [], []
+        asesores, cps_list, financieras, marcas, productos = [], [], [], [], []
     else:
         asesores, cps_list = opts['asesores'], opts['cps']
+        financieras, marcas, productos = opts['financieras'], opts['marcas'], opts['productos']
 
     asesor_sel = st.selectbox('Asesor', ['Todos'] + asesores)
     cps_sel = st.selectbox('CPS', ['Todos'] + cps_list)
+    finan_sel = st.selectbox('Financiera', ['Todas'] + financieras)
+    marca_sel = st.selectbox('Marca', ['Todas'] + marcas)
+    producto_sel = st.selectbox('Producto', ['Todos'] + productos)
 
 asesor = None if asesor_sel == 'Todos' else asesor_sel
 cps = None if cps_sel == 'Todos' else cps_sel
+financiera = None if finan_sel == 'Todas' else finan_sel
+marca = None if marca_sel == 'Todas' else marca_sel
+producto = None if producto_sel == 'Todos' else producto_sel
 
 
 def _cargar_reporte(metodo):
-    return metodo(anio_sel, mes, asesor, cps)
+    return metodo(anio_sel, mes, asesor, cps, financiera, marca, producto)
 
 
 REPORTES = [
