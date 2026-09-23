@@ -34,8 +34,9 @@ MESES = ["Enero", "Febrero", "Marzo", "Abril", "Mayo", "Junio",
 
 
 class Api:
-    def _consultar_tabla(self, columnas, fecha_min=None, fecha_max=None, asesor=None, cps=None):
-        """Trae todas las filas (pagina de a 1000) aplicando filtros de fecha/asesor/cps en el servidor."""
+    def _consultar_tabla(self, columnas, fecha_min=None, fecha_max=None, asesor=None, cps=None,
+                         financiera=None, marca=None, producto=None):
+        """Trae todas las filas (pagina de a 1000) aplicando filtros en el servidor."""
         query = supabase.table('ventas_lefcom').select(','.join(columnas))
         if fecha_min is not None:
             query = query.gte('fecha', fecha_min.isoformat())
@@ -45,6 +46,12 @@ class Api:
             query = query.eq('nombre_asesor', asesor)
         if cps:
             query = query.eq('cps', cps)
+        if financiera:
+            query = query.eq('metodo_pago', financiera)
+        if marca:
+            query = query.eq('marca', marca)
+        if producto:
+            query = query.eq('producto', producto)
 
         datos = []
         offset = 0
@@ -72,8 +79,11 @@ class Api:
         fin = datetime(anio + 1, 1, 1, tzinfo=timezone.utc) if mes == 12 else datetime(anio, mes + 1, 1, tzinfo=timezone.utc)
         return inicio, fin
 
-    def _contar_columna_db(self, col, inicio, fin, asesor=None, cps=None, filtro=None):
-        """Conteo GROUP BY en la BD (RPC contar_columna); None si la función no existe o falla."""
+    def _contar_columna_db(self, col, inicio, fin, asesor=None, cps=None, filtro=None,
+                           financiera=None, marca=None, producto=None):
+        """Conteo GROUP BY en la BD (RPC contar_columna); None si no aplica (filtros extra o función inexistente)."""
+        if financiera or marca or producto:
+            return None
         try:
             resp = supabase.rpc('contar_columna', {
                 'p_col': col,
@@ -88,8 +98,11 @@ class Api:
         data = resp.data or []
         return pd.Series({d['clave']: int(d['n']) for d in data})
 
-    def _sumar_producto_db(self, inicio, fin, asesor=None, cps=None):
-        """SUM(vr_unitario) GROUP BY producto en la BD; None si la función no existe o falla."""
+    def _sumar_producto_db(self, inicio, fin, asesor=None, cps=None,
+                           financiera=None, marca=None, producto=None):
+        """SUM(vr_unitario) GROUP BY producto en la BD; None si no aplica (filtros extra o función inexistente)."""
+        if financiera or marca or producto:
+            return None
         try:
             resp = supabase.rpc('sumar_producto', {
                 'p_desde': inicio.isoformat(),
@@ -190,19 +203,29 @@ class Api:
 
             inicio = datetime(anio, mes, 1, tzinfo=timezone.utc)
             fin = datetime(anio + 1, 1, 1, tzinfo=timezone.utc) if mes == 12 else datetime(anio, mes + 1, 1, tzinfo=timezone.utc)
-            datos = self._consultar_tabla(['nombre_asesor', 'cps'], fecha_min=inicio, fecha_max=fin)
+            datos = self._consultar_tabla(['nombre_asesor', 'cps', 'metodo_pago', 'marca', 'producto'],
+                                  fecha_min=inicio, fecha_max=fin)
             df = pd.DataFrame(datos)
             if df.empty:
-                return {"success": True, "asesores": [], "cps": []}
+                return {"success": True, "asesores": [], "cps": [], "financieras": [], "marcas": [], "productos": []}
             df['nombre_asesor'] = df['nombre_asesor'].fillna('Sin asesor')
             df['cps'] = df['cps'].fillna('Sin CPS')
+            df['metodo_pago'] = df['metodo_pago'].fillna('Sin financiera')
+            df['marca'] = df['marca'].fillna('Sin marca')
+            df['producto'] = df['producto'].fillna('Sin categoría')
+            df = df[df['marca'].astype(str).str.upper() != 'TRAIDO']
             asesores = sorted(df['nombre_asesor'].unique().tolist())
             cps_list = sorted(df['cps'].unique().tolist())
-            return {"success": True, "asesores": asesores, "cps": cps_list}
+            financieras = sorted(df['metodo_pago'].unique().tolist())
+            marcas = sorted(df['marca'].unique().tolist())
+            productos = sorted(df['producto'].unique().tolist())
+            return {"success": True, "asesores": asesores, "cps": cps_list,
+                    "financieras": financieras, "marcas": marcas, "productos": productos}
         except Exception as e:
             return {"success": False, "error": str(e)}
 
-    def get_reporte_asesor_producto(self, anio=None, mes=None, asesor=None, cps=None):
+    def get_reporte_asesor_producto(self, anio=None, mes=None, asesor=None, cps=None,
+                                    financiera=None, marca=None, producto=None):
         try:
             hoy = date.today()
             anio = int(anio) if anio is not None else hoy.year
@@ -217,7 +240,8 @@ class Api:
 
             datos = self._consultar_tabla(['fecha', 'nombre_asesor', 'producto'],
                                           fecha_min=fecha_min, fecha_max=fecha_max,
-                                          asesor=asesor, cps=cps)
+                                          asesor=asesor, cps=cps,
+                                          financiera=financiera, marca=marca, producto=producto)
             df = pd.DataFrame(datos)
             if df.empty:
                 return {"success": True, "products": [], "rows": [], "anio": anio, "mes": mes}
@@ -244,12 +268,15 @@ class Api:
         except Exception as e:
             return {"success": False, "error": str(e)}
 
-    def _contar_metodo_pago(self, anio, mes, asesor=None, cps=None):
+    def _contar_metodo_pago(self, anio, mes, asesor=None, cps=None,
+                            financiera=None, marca=None, producto=None):
         inicio, fin = self._rango_mes(anio, mes)
-        serie = self._contar_columna_db('metodo_pago', inicio, fin, asesor, cps)
+        serie = self._contar_columna_db('metodo_pago', inicio, fin, asesor, cps,
+                                        financiera=financiera, marca=marca, producto=producto)
         if serie is None:
             datos = self._consultar_tabla(['metodo_pago'], fecha_min=inicio, fecha_max=fin,
-                                          asesor=asesor, cps=cps)
+                                          asesor=asesor, cps=cps,
+                                          financiera=financiera, marca=marca, producto=producto)
             serie = pd.Series(dtype='int64')
             if datos:
                 df = pd.DataFrame(datos)
@@ -259,7 +286,8 @@ class Api:
         serie = serie[serie.index.notna() & (serie.index.astype(str).str.strip() != '')]
         return serie
 
-    def get_reporte_financieras(self, anio=None, mes=None, asesor=None, cps=None):
+    def get_reporte_financieras(self, anio=None, mes=None, asesor=None, cps=None,
+                                financiera=None, marca=None, producto=None):
         try:
             hoy = date.today()
             anio = int(anio) if anio is not None else hoy.year
@@ -270,8 +298,10 @@ class Api:
             else:
                 mes_ant, anio_ant = mes - 1, anio
 
-            serie_ant = self._contar_metodo_pago(anio_ant, mes_ant, asesor=asesor, cps=cps)
-            serie_act = self._contar_metodo_pago(anio, mes, asesor=asesor, cps=cps)
+            serie_ant = self._contar_metodo_pago(anio_ant, mes_ant, asesor=asesor, cps=cps,
+                                             financiera=financiera, marca=marca, producto=producto)
+            serie_act = self._contar_metodo_pago(anio, mes, asesor=asesor, cps=cps,
+                                                 financiera=financiera, marca=marca, producto=producto)
 
             metodos = sorted(set(serie_ant.index) | set(serie_act.index),
                              key=lambda x: int(serie_act.get(x, 0)), reverse=True)
@@ -303,12 +333,15 @@ class Api:
         except Exception as e:
             return {"success": False, "error": str(e)}
 
-    def _contar_producto(self, anio, mes, asesor=None, cps=None):
+    def _contar_producto(self, anio, mes, asesor=None, cps=None,
+                         financiera=None, marca=None, producto=None):
         inicio, fin = self._rango_mes(anio, mes)
-        serie = self._contar_columna_db('producto', inicio, fin, asesor, cps)
+        serie = self._contar_columna_db('producto', inicio, fin, asesor, cps,
+                                        financiera=financiera, marca=marca, producto=producto)
         if serie is None:
             datos = self._consultar_tabla(['producto'], fecha_min=inicio, fecha_max=fin,
-                                          asesor=asesor, cps=cps)
+                                          asesor=asesor, cps=cps,
+                                          financiera=financiera, marca=marca, producto=producto)
             serie = pd.Series(dtype='int64')
             if datos:
                 df = pd.DataFrame(datos)
@@ -316,7 +349,8 @@ class Api:
                 serie = df['producto'].value_counts()
         return self._normalizar_serie(serie, 'Sin categoría')
 
-    def get_reporte_productos(self, anio=None, mes=None, asesor=None, cps=None):
+    def get_reporte_productos(self, anio=None, mes=None, asesor=None, cps=None,
+                              financiera=None, marca=None, producto=None):
         try:
             hoy = date.today()
             anio = int(anio) if anio is not None else hoy.year
@@ -328,9 +362,12 @@ class Api:
                 mes_ant, anio_ant = mes - 1, anio
             anio_prev = anio - 1
 
-            serie_anio_pre = self._contar_producto(anio_prev, mes, asesor=asesor, cps=cps)
-            serie_ant = self._contar_producto(anio_ant, mes_ant, asesor=asesor, cps=cps)
-            serie_act = self._contar_producto(anio, mes, asesor=asesor, cps=cps)
+            serie_anio_pre = self._contar_producto(anio_prev, mes, asesor=asesor, cps=cps,
+                                               financiera=financiera, marca=marca, producto=producto)
+            serie_ant = self._contar_producto(anio_ant, mes_ant, asesor=asesor, cps=cps,
+                                              financiera=financiera, marca=marca, producto=producto)
+            serie_act = self._contar_producto(anio, mes, asesor=asesor, cps=cps,
+                                              financiera=financiera, marca=marca, producto=producto)
 
             productos = sorted(set(serie_anio_pre.index) | set(serie_ant.index) | set(serie_act.index),
                                key=lambda x: int(serie_act.get(x, 0)), reverse=True)
@@ -367,12 +404,15 @@ class Api:
         except Exception as e:
             return {"success": False, "error": str(e)}
 
-    def _contar_marca(self, anio, mes, asesor=None, cps=None):
+    def _contar_marca(self, anio, mes, asesor=None, cps=None,
+                      financiera=None, marca=None, producto=None):
         inicio, fin = self._rango_mes(anio, mes)
-        serie = self._contar_columna_db('marca', inicio, fin, asesor, cps)
+        serie = self._contar_columna_db('marca', inicio, fin, asesor, cps,
+                                        financiera=financiera, marca=marca, producto=producto)
         if serie is None:
             datos = self._consultar_tabla(['marca'], fecha_min=inicio, fecha_max=fin,
-                                          asesor=asesor, cps=cps)
+                                          asesor=asesor, cps=cps,
+                                          financiera=financiera, marca=marca, producto=producto)
             serie = pd.Series(dtype='int64')
             if datos:
                 df = pd.DataFrame(datos)
@@ -383,7 +423,8 @@ class Api:
             serie = serie[serie.index.astype(str).str.upper() != 'TRAIDO']
         return self._normalizar_serie(serie, 'Sin marca')
 
-    def get_reporte_marcas(self, anio=None, mes=None, asesor=None, cps=None):
+    def get_reporte_marcas(self, anio=None, mes=None, asesor=None, cps=None,
+                           financiera=None, marca=None, producto=None):
         try:
             hoy = date.today()
             anio = int(anio) if anio is not None else hoy.year
@@ -394,8 +435,10 @@ class Api:
             else:
                 mes_ant, anio_ant = mes - 1, anio
 
-            serie_ant = self._contar_marca(anio_ant, mes_ant, asesor=asesor, cps=cps)
-            serie_act = self._contar_marca(anio, mes, asesor=asesor, cps=cps)
+            serie_ant = self._contar_marca(anio_ant, mes_ant, asesor=asesor, cps=cps,
+                                       financiera=financiera, marca=marca, producto=producto)
+            serie_act = self._contar_marca(anio, mes, asesor=asesor, cps=cps,
+                                           financiera=financiera, marca=marca, producto=producto)
 
             marcas = sorted(set(serie_ant.index) | set(serie_act.index),
                             key=lambda x: int(serie_act.get(x, 0)), reverse=True)
@@ -427,12 +470,15 @@ class Api:
         except Exception as e:
             return {"success": False, "error": str(e)}
 
-    def _contar_plan(self, anio, mes, asesor=None, cps=None):
+    def _contar_plan(self, anio, mes, asesor=None, cps=None,
+                     financiera=None, marca=None, producto=None):
         inicio, fin = self._rango_mes(anio, mes)
-        serie = self._contar_columna_db('plan', inicio, fin, asesor, cps, filtro='postpago')
+        serie = self._contar_columna_db('plan', inicio, fin, asesor, cps, filtro='postpago',
+                                        financiera=financiera, marca=marca, producto=producto)
         if serie is None:
             datos = self._consultar_tabla(['plan', 'producto'], fecha_min=inicio, fecha_max=fin,
-                                          asesor=asesor, cps=cps)
+                                          asesor=asesor, cps=cps,
+                                          financiera=financiera, marca=marca, producto=producto)
             serie = pd.Series(dtype='int64')
             if datos:
                 df = pd.DataFrame(datos)
@@ -441,7 +487,8 @@ class Api:
                 serie = df['plan'].value_counts()
         return self._normalizar_serie(serie, 'Sin plan')
 
-    def get_reporte_planes(self, anio=None, mes=None, asesor=None, cps=None):
+    def get_reporte_planes(self, anio=None, mes=None, asesor=None, cps=None,
+                           financiera=None, marca=None, producto=None):
         try:
             hoy = date.today()
             anio = int(anio) if anio is not None else hoy.year
@@ -452,8 +499,10 @@ class Api:
             else:
                 mes_ant, anio_ant = mes - 1, anio
 
-            serie_ant = self._contar_plan(anio_ant, mes_ant, asesor=asesor, cps=cps)
-            serie_act = self._contar_plan(anio, mes, asesor=asesor, cps=cps)
+            serie_ant = self._contar_plan(anio_ant, mes_ant, asesor=asesor, cps=cps,
+                                      financiera=financiera, marca=marca, producto=producto)
+            serie_act = self._contar_plan(anio, mes, asesor=asesor, cps=cps,
+                                          financiera=financiera, marca=marca, producto=producto)
 
             planes = sorted(set(serie_ant.index) | set(serie_act.index),
                             key=lambda x: int(serie_act.get(x, 0)), reverse=True)
@@ -485,17 +534,20 @@ class Api:
         except Exception as e:
             return {"success": False, "error": str(e)}
 
-    def get_reporte_referencias(self, anio=None, mes=None, asesor=None, cps=None):
+    def get_reporte_referencias(self, anio=None, mes=None, asesor=None, cps=None,
+                                financiera=None, marca=None, producto=None):
         try:
             hoy = date.today()
             anio = int(anio) if anio is not None else hoy.year
             mes = int(mes) if mes is not None else hoy.month
 
             inicio, fin = self._rango_mes(anio, mes)
-            serie = self._contar_columna_db('referencia', inicio, fin, asesor, cps)
+            serie = self._contar_columna_db('referencia', inicio, fin, asesor, cps,
+                                        financiera=financiera, marca=marca, producto=producto)
             if serie is None:
                 datos = self._consultar_tabla(['referencia'], fecha_min=inicio, fecha_max=fin,
-                                              asesor=asesor, cps=cps)
+                                              asesor=asesor, cps=cps,
+                                              financiera=financiera, marca=marca, producto=producto)
                 serie = pd.Series(dtype='int64')
                 if datos:
                     df = pd.DataFrame(datos)
@@ -516,17 +568,20 @@ class Api:
         except Exception as e:
             return {"success": False, "error": str(e)}
 
-    def get_reporte_ingresos(self, anio=None, mes=None, asesor=None, cps=None):
+    def get_reporte_ingresos(self, anio=None, mes=None, asesor=None, cps=None,
+                             financiera=None, marca=None, producto=None):
         try:
             hoy = date.today()
             anio = int(anio) if anio is not None else hoy.year
             mes = int(mes) if mes is not None else hoy.month
 
             inicio, fin = self._rango_mes(anio, mes)
-            suma = self._sumar_producto_db(inicio, fin, asesor, cps)
+            suma = self._sumar_producto_db(inicio, fin, asesor, cps,
+                                           financiera=financiera, marca=marca, producto=producto)
             if suma is None:
                 datos = self._consultar_tabla(['producto', 'vr_unitario'], fecha_min=inicio, fecha_max=fin,
-                                              asesor=asesor, cps=cps)
+                                              asesor=asesor, cps=cps,
+                                              financiera=financiera, marca=marca, producto=producto)
                 suma = pd.Series(dtype='float64')
                 if datos:
                     df = pd.DataFrame(datos)
@@ -547,12 +602,15 @@ class Api:
         except Exception as e:
             return {"success": False, "error": str(e)}
 
-    def _contar_cps(self, anio, mes, asesor=None, cps=None):
+    def _contar_cps(self, anio, mes, asesor=None, cps=None,
+                    financiera=None, marca=None, producto=None):
         inicio, fin = self._rango_mes(anio, mes)
-        serie = self._contar_columna_db('cps', inicio, fin, asesor, cps, filtro='no_traido')
+        serie = self._contar_columna_db('cps', inicio, fin, asesor, cps, filtro='no_traido',
+                                        financiera=financiera, marca=marca, producto=producto)
         if serie is None:
             datos = self._consultar_tabla(['cps', 'marca'], fecha_min=inicio, fecha_max=fin,
-                                          asesor=asesor, cps=cps)
+                                          asesor=asesor, cps=cps,
+                                          financiera=financiera, marca=marca, producto=producto)
             serie = pd.Series(dtype='int64')
             if datos:
                 df = pd.DataFrame(datos)
@@ -561,7 +619,8 @@ class Api:
                 serie = df['cps'].value_counts()
         return self._normalizar_serie(serie, 'Sin CPS')
 
-    def get_reporte_cps(self, anio=None, mes=None, asesor=None, cps=None):
+    def get_reporte_cps(self, anio=None, mes=None, asesor=None, cps=None,
+                        financiera=None, marca=None, producto=None):
         try:
             hoy = date.today()
             anio = int(anio) if anio is not None else hoy.year
@@ -572,8 +631,10 @@ class Api:
             else:
                 mes_ant, anio_ant = mes - 1, anio
 
-            serie_ant = self._contar_cps(anio_ant, mes_ant, asesor=asesor, cps=cps)
-            serie_act = self._contar_cps(anio, mes, asesor=asesor, cps=cps)
+            serie_ant = self._contar_cps(anio_ant, mes_ant, asesor=asesor, cps=cps,
+                                     financiera=financiera, marca=marca, producto=producto)
+            serie_act = self._contar_cps(anio, mes, asesor=asesor, cps=cps,
+                                         financiera=financiera, marca=marca, producto=producto)
 
             cps_list = sorted(set(serie_ant.index) | set(serie_act.index),
                               key=lambda x: int(serie_act.get(x, 0)), reverse=True)
