@@ -81,9 +81,8 @@ class Api:
 
     def _contar_columna_db(self, col, inicio, fin, asesor=None, cps=None, filtro=None,
                            financiera=None, marca=None, producto=None):
-        """Conteo GROUP BY en la BD (RPC contar_columna); None si no aplica (filtros extra o función inexistente)."""
-        if financiera or marca or producto:
-            return None
+        """Conteo GROUP BY en la BD (RPC contar_columna; acepta financiera/marca/producto);
+        None si la función no existe o falla (se cae al fallback pandas)."""
         try:
             resp = supabase.rpc('contar_columna', {
                 'p_col': col,
@@ -92,6 +91,9 @@ class Api:
                 'p_asesor': asesor,
                 'p_cps': cps,
                 'p_filtro': filtro,
+                'p_financiera': financiera,
+                'p_marca': marca,
+                'p_producto': producto,
             }).execute()
         except Exception:
             return None
@@ -100,15 +102,17 @@ class Api:
 
     def _sumar_producto_db(self, inicio, fin, asesor=None, cps=None,
                            financiera=None, marca=None, producto=None):
-        """SUM(vr_unitario) GROUP BY producto en la BD; None si no aplica (filtros extra o función inexistente)."""
-        if financiera or marca or producto:
-            return None
+        """SUM(vr_unitario) GROUP BY producto en la BD (acepta financiera/marca/producto);
+        None si la función no existe o falla (se cae al fallback pandas)."""
         try:
             resp = supabase.rpc('sumar_producto', {
                 'p_desde': inicio.isoformat(),
                 'p_hasta': fin.isoformat(),
                 'p_asesor': asesor,
                 'p_cps': cps,
+                'p_financiera': financiera,
+                'p_marca': marca,
+                'p_producto': producto,
             }).execute()
         except Exception:
             return None
