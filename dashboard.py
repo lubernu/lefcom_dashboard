@@ -2,7 +2,8 @@ import os
 import sys
 from datetime import date
 
-REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+HERE = os.path.dirname(os.path.abspath(__file__))
+REPO = os.path.dirname(HERE) if os.path.basename(HERE) == 'streamlit_app' else HERE
 sys.path.insert(0, REPO)
 
 import streamlit as st
@@ -29,8 +30,13 @@ def _credenciales():
 
 SUPABASE_URL, SUPABASE_KEY = _credenciales()
 if not SUPABASE_URL or not SUPABASE_KEY:
+    try:
+        disponibles = ', '.join([k for k in st.secrets if k.lower() not in ('supabase_url', 'supabase_key')]) or '(ninguna)'
+    except Exception:
+        disponibles = '(no se pudo leer st.secrets)'
     st.error('Faltan credenciales de Supabase: define SUPABASE_URL y SUPABASE_KEY '
-             'en los Secrets de Streamlit Cloud (o en .env local).')
+             'en los Secrets de Streamlit Cloud (o en .env local). '
+             f'Claves presentes en st.secrets: {disponibles}')
     st.stop()
 
 from app import Api
