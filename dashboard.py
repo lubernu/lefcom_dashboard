@@ -48,6 +48,19 @@ api = Api()
 MESES = ['Enero', 'Febrero', 'Marzo', 'Abril', 'Mayo', 'Junio',
          'Julio', 'Agosto', 'Septiembre', 'Octubre', 'Noviembre', 'Diciembre']
 
+DIAS = ['asesor', 'cps', 'financiera', 'marca', 'producto']
+
+for d in DIAS:
+    if f'f_{d}' not in st.session_state:
+        st.session_state[f'f_{d}'] = 'Todo'
+if '_pend' not in st.session_state:
+    st.session_state['_pend'] = {}
+
+if st.session_state['_pend']:
+    for d, v in st.session_state['_pend'].items():
+        st.session_state[f'f_{d}'] = v
+    st.session_state['_pend'] = {}
+
 
 @st.cache_data(ttl=300, show_spinner=False)
 def _get_filtros():
@@ -69,7 +82,7 @@ def _df_int(rows):
     return df
 
 
-def _render(res, titulo):
+def _render(res, titulo, key=None, col_click=None, propia=None):
     st.subheader(titulo)
     if not res.get('success'):
         st.error(res.get('error', 'Error al consultar.'))
@@ -78,7 +91,70 @@ def _render(res, titulo):
     if not rows:
         st.info('No hay ventas en este periodo.')
         return
-    st.dataframe(_df_int(rows), width='stretch', hide_index=True)
+    df = _df_int(rows)
+    if key is None:
+        st.dataframe(df, width='stretch', hide_index=True)
+        return
+    ev = st.dataframe(df, width='stretch', hide_index=True, on_select='rerun',
+                      selection_mode='single-row', key=key)
+    if col_click and propia and ev is not None and ev.selection is not None and ev.selection.rows:
+        idx = int(ev.selection.rows[0])
+        if idx < len(df):
+            valor = str(df.iloc[idx][col_click])
+            if valor.strip().upper() != 'TOTAL':
+                proc = st.session_state.setdefault('_click_proc', {})
+                clave = tuple(ev.selection.rows)
+                if proc.get(key) != clave:
+                    proc[key] = clave
+                    st.session_state['_pend'][propia] = valor
+                    st.rerun()
+
+
+@st.cache_data(ttl=90, show_spinner=False)
+def _reporte(nombre, anio, mes, asesor, cps, financiera, marca, producto):
+    return getattr(api, 'get_reporte_' + nombre)(anio, mes, asesor, cps, financiera, marca, producto)
+
+
+# (nombre, columna del click, dimensión que filtra)
+CONFIG = [
+    ('asesor_producto', 'asesor', 'asesor'),
+    ('marcas',          'marca',  'marca'),
+    ('productos',       'producto', 'producto'),
+    ('financieras',     'metodo', 'financiera'),
+    ('cps',             'cps',    'cps'),
+    ('planes',          None,     None),
+    ('referencias',     None,     None),
+    ('ingresos',        'producto', 'producto'),
+]
+
+
+def _ff(dim):
+    """Valores de filtro con la dimensión propia excluida (None = no filtra)."""
+    return (
+        None if dim == 'asesor' else st.session_state['f_asesor'],
+        None if dim == 'cps' else st.session_state['f_cps'],
+        None if dim == 'financiera' else st.session_state['f_financiera'],
+        None if dim == 'marca' else st.session_state['f_marca'],
+        None if dim == 'producto' else st.session_state['f_producto'],
+    )
+
+
+def _a_none(v):
+    return None if v == 'Todo' else v
+
+
+def _cargar_todos(anio_sel, mes):
+    resultados = {}
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        futures = {}
+        for nombre, _, dim in CONFIG:
+            a, c, fin, m, p = _ff(dim)
+            futures[nombre] = pool.submit(_reporte, nombre, anio_sel, mes,
+                                          _a_none(a), _a_none(c), _a_none(fin),
+                                          _a_none(m), _a_none(p))
+        for nombre, fut in futures.items():
+            resultados[nombre] = fut.result()
+    return resultados
 
 
 filtros = _get_filtros()
@@ -95,6 +171,12 @@ with st.sidebar:
     mes_sel = st.selectbox('Mes', MESES, index=hoy.month - 1)
     mes = MESES.index(mes_sel) + 1
 
+    if mes != st.session_state.get('_mes_cache') or anio_sel != st.session_state.get('_anio_cache'):
+        st.session_state['_mes_cache'] = mes
+        st.session_state['_anio_cache'] = anio_sel
+        for d in DIAS:
+            st.session_state[f'f_{d}'] = 'Todo'
+
     opts = _get_opciones(anio_sel, mes)
     if not opts.get('success'):
         st.error(opts.get('error', 'Error al cargar opciones.'))
@@ -103,67 +185,60 @@ with st.sidebar:
         asesores, cps_list = opts['asesores'], opts['cps']
         financieras, marcas, productos = opts['financieras'], opts['marcas'], opts['productos']
 
-    asesor_sel = st.selectbox('Asesor', ['Todos'] + asesores)
-    cps_sel = st.selectbox('CPS', ['Todos'] + cps_list)
-    finan_sel = st.selectbox('Financiera', ['Todas'] + financieras)
-    marca_sel = st.selectbox('Marca', ['Todas'] + marcas)
-    producto_sel = st.selectbox('Producto', ['Todos'] + productos)
+    st.selectbox('Asesor', ['Todo'] + asesores, key='f_asesor')
+    st.selectbox('CPS', ['Todo'] + cps_list, key='f_cps')
+    st.selectbox('Financiera', ['Todo'] + financieras, key='f_financiera')
+    st.selectbox('Marca', ['Todo'] + marcas, key='f_marca')
+    st.selectbox('Producto', ['Todo'] + productos, key='f_producto')
 
-asesor = None if asesor_sel == 'Todos' else asesor_sel
-cps = None if cps_sel == 'Todos' else cps_sel
-financiera = None if finan_sel == 'Todas' else finan_sel
-marca = None if marca_sel == 'Todas' else marca_sel
-producto = None if producto_sel == 'Todos' else producto_sel
-
-
-def _cargar_reporte(metodo):
-    return metodo(anio_sel, mes, asesor, cps, financiera, marca, producto)
-
-
-REPORTES = [
-    api.get_reporte_asesor_producto,
-    api.get_reporte_financieras,
-    api.get_reporte_productos,
-    api.get_reporte_marcas,
-    api.get_reporte_cps,
-    api.get_reporte_planes,
-    api.get_reporte_referencias,
-    api.get_reporte_ingresos,
-]
+    activos = {d: st.session_state[f'f_{d}'] for d in DIAS if st.session_state[f'f_{d}'] != 'Todo'}
+    if activos:
+        st.write('**Filtros activos**')
+        for d, v in activos.items():
+            c1, c2 = st.columns([3, 1])
+            c1.caption(f'{d.capitalize()}: {v}')
+            if c2.button('✕', key=f'clear_{d}'):
+                st.session_state['_pend'][d] = 'Todo'
+                st.rerun()
 
 tab_resumen, tab_hist = st.tabs(['📊 Resumen', '🕘 Historial'])
 
 with tab_resumen:
     with st.spinner('Cargando reportes...'):
-        with ThreadPoolExecutor(max_workers=8) as pool:
-            res_as, res_fin, res_prod, res_marca, res_cps, res_plan, res_ref, res_ing = list(
-                pool.map(_cargar_reporte, REPORTES))
+        R = _cargar_todos(anio_sel, mes)
 
     c1, c2 = st.columns([0.65, 0.35])
     with c1:
-        _render(res_as, f"Conteo de ventas por asesor y producto — {MESES[mes - 1]} de {anio_sel}"
-                        f"  ({len(res_as.get('rows', [])) if res_as.get('success') else 0} asesores)")
+        _render(R['asesor_producto'],
+                f"Conteo de ventas por asesor y producto — {MESES[mes - 1]} de {anio_sel}"
+                f"  ({len(R['asesor_producto'].get('rows', [])) if R['asesor_producto'].get('success') else 0} asesores)",
+                key='df_as', col_click='asesor', propia='asesor')
     with c2:
-        _render(res_marca, "Ventas por Marca — " + (res_marca.get('mes_actual_label') or ''))
+        _render(R['marcas'], "Ventas por Marca — " + (R['marcas'].get('mes_actual_label') or ''),
+                key='df_marca', col_click='marca', propia='marca')
 
     c3, c4 = st.columns([0.65, 0.35])
     with c3:
-        _render(res_prod, "Ventas por Producto — " + (res_prod.get('mes_actual_label') or '') +
-                ("  (año anterior: " + res_prod.get('anio_anterior_label', '') + ")" if res_prod.get('anio_anterior_label') else ''))
+        _render(R['productos'], "Ventas por Producto — " + (R['productos'].get('mes_actual_label') or '') +
+                ("  (año anterior: " + R['productos'].get('anio_anterior_label', '') + ")" if R['productos'].get('anio_anterior_label') else ''),
+                key='df_prod', col_click='producto', propia='producto')
     with c4:
-        _render(res_fin, "Ventas por Financiera — " + (res_fin.get('mes_actual_label') or ''))
+        _render(R['financieras'], "Ventas por Financiera — " + (R['financieras'].get('mes_actual_label') or ''),
+                key='df_fin', col_click='metodo', propia='financiera')
 
     c5, c6 = st.columns(2)
     with c5:
-        _render(res_cps, "Marcas por CPS — " + (res_cps.get('mes_actual_label') or ''))
+        _render(R['cps'], "Marcas por CPS — " + (R['cps'].get('mes_actual_label') or ''),
+                key='df_cps', col_click='cps', propia='cps')
     with c6:
-        _render(res_plan, "Planes Vendidos (Postpago) — " + (res_plan.get('mes_actual_label') or ''))
+        _render(R['planes'], "Planes Vendidos (Postpago) — " + (R['planes'].get('mes_actual_label') or ''))
 
     c7, c8 = st.columns(2)
     with c7:
-        _render(res_ref, "Ventas por Referencia — " + (res_ref.get('mes_actual_label') or ''))
+        _render(R['referencias'], "Ventas por Referencia — " + (R['referencias'].get('mes_actual_label') or ''))
     with c8:
-        _render(res_ing, "Ingreso por Equipos — " + (res_ing.get('mes_actual_label') or ''))
+        _render(R['ingresos'], "Ingreso por Equipos — " + (R['ingresos'].get('mes_actual_label') or ''),
+                key='df_ing', col_click='producto', propia='producto')
 
 with tab_hist:
     tipo_hist = st.radio('Historial', ['Producto', 'PDV', 'Marca', 'Asesor'], horizontal=True)
